@@ -1,11 +1,11 @@
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_tavily import TavilySearch
 from app.config import vectorstore
 import os
 import numpy as np
 from typing import List
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-web_search = TavilySearchResults(k=8, tavily_api_key=TAVILY_API_KEY)
+web_search = TavilySearch(k=8, tavily_api_key=TAVILY_API_KEY)
 
 def normalize_scores(scores: List[float], method: str = "min_max") -> List[float]:
     """
@@ -96,7 +96,7 @@ def rag_context(query: str, top_k: int = 3, local_weight: float = 0.2, web_weigh
         web_results = []
         web_scores = []
         
-        for r in web_results_raw:
+        for r in web_results_raw.get("results", []):
             # Compute a simple relevance score (keyword-based)
             relevance_score = calculate_relevance_score(r["content"], query)
             

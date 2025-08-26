@@ -75,7 +75,8 @@ async def stream_chat_with_rag(user_message: str, use_advanced_rag: bool = False
         top_k: Number of context results to retrieve
     """
     try:
-        # Step 1: Retrieve relevant context using RAG
+        # Step 1: Retrieve relevant context using RAG and notify client
+        yield "event: rag_start\ndata: Begin RAG...\n\n"
         if use_advanced_rag:
             rag_results = rag_context_advanced(
                 query=user_message, 
@@ -91,9 +92,10 @@ async def stream_chat_with_rag(user_message: str, use_advanced_rag: bool = False
                 web_weight=0.7
             )
         
-        # Step 2: Format context
+        # Step 2: Format context and notify client is ready for next step
         context = format_context(rag_results)
-        
+        yield "event: rag_end\ndata: End RAG...\n\n"
+
         # Step 3: Build enhanced prompt
         enhanced_prompt = build_enhanced_prompt(user_message, context)
         
@@ -118,7 +120,6 @@ async def stream_chat_with_rag(user_message: str, use_advanced_rag: bool = False
         error_message = f"Error when processing: {str(e)}"
         yield f"data: {error_message}\n\n"
 
-# Unified chat function with all options
 async def chat(session_id: str,
                user_message: str, 
                use_rag: bool = False,
@@ -128,72 +129,107 @@ async def chat(session_id: str,
                temperature: float = 0.7,
                max_output_tokens: int = 2048):
 
-    # 1) Save user message to Redis
+    # 1) Save user message
     await store.append(session_id, {"role": "user", "parts": [{"text": user_message}]})
-
-    # 2) Retrieve history (previous Q&A)
+    # 2) Retrieve history
     history = await store.get_history(session_id)
 
     try:
-        # 3) Prepare RAG context if needed
-        if use_rag:
-            if use_advanced_rag:
-                rag_results = rag_context_advanced(
-                    query=user_message, 
-                    top_k=top_k,
-                    similarity_threshold=0.3,
-                    diversity_factor=0.2
-                )
-            else:
-                rag_results = rag_context(
-                    query=user_message,
-                    top_k=top_k,
-                    local_weight=0.3,
-                    web_weight=0.7
-                )
+        rag_results = []
+        context = ""
 
-            context = format_context(rag_results)
-            # Add user message with context to history
-            history = history + [{"role": "user", "parts": [{"text": build_enhanced_prompt(user_message, context)}]}]
-        else:
-           # if not using RAG, just add the user message
-            history = history
-
-        # 4) Model configuration
-        model_config = {
-            "system_instruction": SYSTEM_INSTRUCTION,
-            "temperature": temperature,
-            "max_output_tokens": max_output_tokens
-        }
-
-        # 5) Call model
+        # 3) Nếu dùng stream
         if use_stream:
-            stream = client.models.generate_content_stream(
-                model=MODEL,
-                contents=history,
-                config=model_config
-            )
-
             async def stream_generator():
                 buffer = []
+
+                # If using RAG, fetch context first
+                if use_rag:
+                    yield "event: rag_start\ndata: Begin RAG...\n\n"
+
+                    # Run RAG
+                    if use_advanced_rag:
+                        rag_results = rag_context_advanced(
+                            query=user_message, 
+                            top_k=top_k,
+                            similarity_threshold=0.3,
+                            diversity_factor=0.2
+                        )
+                    else:
+                        rag_results = rag_context(
+                            query=user_message,
+                            top_k=top_k,
+                            local_weight=0.3,
+                            web_weight=0.7
+                        )
+
+                    context = format_context(rag_results)
+                    history.append({
+                        "role": "user",
+                        "parts": [{"text": build_enhanced_prompt(user_message, context)}]
+                    })
+
+                    # Notify end of RAG
+                    yield "event: rag_end\ndata: End RAG...\n\n"
+
+                # Model config
+                model_config = {
+                    "system_instruction": SYSTEM_INSTRUCTION,
+                    "temperature": temperature,
+                    "max_output_tokens": max_output_tokens
+                }
+
+                # Call model stream
+                stream = client.models.generate_content_stream(
+                    model=MODEL,
+                    contents=history,
+                    config=model_config
+                )
+
                 for chunk in stream:
                     if chunk.text:
                         buffer.append(chunk.text)
                         yield f"data: {chunk.text}\n\n"
                     await asyncio.sleep(0)
-                # When done, save the full response to Redis
+
                 if buffer:
                     await store.append(session_id, {"role": "model", "parts": [{"text": "".join(buffer)}]})
 
             return stream_generator()
 
         else:
+            # If not streaming, just get full response
+            if use_rag:
+                if use_advanced_rag:
+                    rag_results = rag_context_advanced(
+                        query=user_message, 
+                        top_k=top_k,
+                        similarity_threshold=0.3,
+                        diversity_factor=0.2
+                    )
+                else:
+                    rag_results = rag_context(
+                        query=user_message,
+                        top_k=top_k,
+                        local_weight=0.3,
+                        web_weight=0.7
+                    )
+
+                context = format_context(rag_results)
+                history.append({
+                    "role": "user",
+                    "parts": [{"text": build_enhanced_prompt(user_message, context)}]
+                })
+
             response = client.models.generate_content(
                 model=MODEL,
                 contents=history,
-                config=model_config
+                config={
+                    "system_instruction": SYSTEM_INSTRUCTION,
+                    "temperature": temperature,
+                    "max_output_tokens": max_output_tokens
+                }
             )
-            # 6) Save response to Redis
             await store.append(session_id, {"role": "model", "parts": [{"text": response.text}]})
             return response.text
 
@@ -205,6 +241,7 @@ async def chat(session_id: str,
             return error_generator()
         else:
             return error_message
+
 
         
 # Quick helper functions for common use cases
